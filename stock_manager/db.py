@@ -97,11 +97,18 @@ def _norm(row: dict) -> dict:
 
 def list_pending() -> list[dict]:
     rows = supa.select("entries", {
-        "select": "id,date,slot,title,url,raw_text",
+        "select": "id,date,slot,title,url,raw_text,"
+                  "attachments(id,path,original_name),comments(sender,at,text)",
         "status": "eq.pending",
         "order": "date.asc,id.asc",
     })
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        r = dict(r)
+        for a in r.get("attachments") or []:
+            a["url"] = supa.public_image_url(a["path"])
+        out.append(r)
+    return out
 
 
 def get_entry(entry_id: int) -> dict | None:
@@ -118,6 +125,8 @@ def get_entry(entry_id: int) -> dict | None:
     entry["tickers"] = supa.select("tickers", {
         "select": "name,code,note", "entry_id": f"eq.{entry_id}", "order": "id.asc",
     })
+    entry["attachments"] = list_attachments(entry_id)
+    entry["comments"] = list_comments(entry_id)
     return entry
 
 
@@ -236,6 +245,53 @@ def ticker_timeline(name: str) -> list[dict]:
         "id": f"in.({','.join(str(i) for i in ids)})",
         "order": "date.desc,id.desc",
     })]
+
+
+def add_comments(entry_id: int, comments: list[dict]) -> None:
+    """단톡방에서 오간 대화를 뉴스에 붙여 저장합니다."""
+    if not comments:
+        return
+    supa.insert("comments", [
+        {"entry_id": entry_id, "idx": i, "sender": c["sender"],
+         "at": c["at"], "text": c["text"]}
+        for i, c in enumerate(comments)
+    ], returning=False)
+
+
+def list_comments(entry_id: int) -> list[dict]:
+    return supa.select("comments", {
+        "select": "sender,at,text", "entry_id": f"eq.{entry_id}", "order": "idx.asc",
+    })
+
+
+def add_attachment(entry_id: int, path: str, original_name: str,
+                   taken_at: str | None, source_key: str | None) -> int:
+    row = {"entry_id": entry_id, "path": path, "original_name": original_name}
+    if taken_at:
+        row["taken_at"] = taken_at
+    if source_key:
+        row["source_key"] = source_key
+    rows = supa.insert("attachments", row)
+    return int(rows[0]["id"])
+
+
+def list_attachments(entry_id: int) -> list[dict]:
+    rows = supa.select("attachments", {
+        "select": "id,path,original_name,taken_at",
+        "entry_id": f"eq.{entry_id}",
+        "order": "id.asc",
+    })
+    for r in rows:
+        r["url"] = supa.public_image_url(r["path"])
+    return rows
+
+
+def existing_image_digests() -> set[str]:
+    """이미 올린 사진의 지문 (같은 사진 재업로드 방지)."""
+    rows = supa.select("attachments", {
+        "select": "source_key", "source_key": "not.is.null", "limit": "5000",
+    })
+    return {r["source_key"] for r in rows if r.get("source_key")}
 
 
 def existing_source_keys() -> set[str]:

@@ -186,9 +186,20 @@ def cmd_tickers(args) -> int:
 def cmd_import_kakao(args) -> int:
     from . import kakao
 
-    messages = kakao.load(args.file)
-    if not messages:
-        print("대화 내용을 읽지 못했습니다. 카카오톡 [대화 내보내기]로 만든 txt 파일인지 확인해 주세요.",
+    txt_path, image_dir, tmpdir = kakao.open_export(args.file)
+    try:
+        return _import_kakao(args, kakao, txt_path, image_dir)
+    finally:
+        kakao.cleanup(tmpdir)
+
+
+def _import_kakao(args, kakao, txt_path: str | None, image_dir: str) -> int:
+    messages = kakao.load(txt_path) if txt_path else []
+    photos = [] if args.no_images else kakao.find_photos(image_dir)
+
+    if not messages and not photos:
+        print("대화 내용도 사진도 찾지 못했습니다.", file=sys.stderr)
+        print("카카오톡 [대화 내보내기]로 만든 txt 파일, 또는 사진이 함께 든 폴더/zip 을 지정해 주세요.",
               file=sys.stderr)
         return 1
 
@@ -200,6 +211,25 @@ def cmd_import_kakao(args) -> int:
         min_length=args.min_length,
     )
     print(f"메시지 {len(messages)}개에서 뉴스 후보 {len(cands)}건을 찾았습니다.")
+
+    if not args.no_comments:
+        kakao.collect_comments(messages, cands)
+        total = sum(len(c.comments) for c in cands)
+        if total:
+            print(f"뉴스 주변에서 오간 대화 {total}줄을 함께 담았습니다.")
+
+    if photos:
+        if args.date_from:
+            photos = [p for p in photos if p.date >= args.date_from]
+        if args.date_to:
+            photos = [p for p in photos if p.date <= args.date_to]
+        cands = kakao.attach_photos(cands, photos)
+        print(f"사진 {len(photos)}장을 찾아 시각이 가까운 뉴스에 붙였습니다.")
+    else:
+        placeholders = kakao.count_attachments(messages)
+        if placeholders:
+            print(f"대화에 사진 {placeholders}장이 있지만 이 파일에는 원본이 없습니다.")
+            print("  카톡에서 [모든 파일 보내기]로 내보낸 폴더나 zip 을 주시면 사진도 함께 가져옵니다.")
 
     # 이미 가져온 건은 빼둡니다. 카톡 내보내기는 늘 대화 전체를 담고 있어서,
     # 며칠 뒤 다시 내보내도 새로 올라온 것만 들어가게 됩니다.
@@ -223,12 +253,20 @@ def cmd_import_kakao(args) -> int:
               else "조건에 맞는 메시지가 없습니다. --min-length 를 줄이거나 --sender 를 빼고 다시 시도해 보세요.")
         return 0
 
-    saved = 0
+    already_images = set() if args.dry_run else db.existing_image_digests()
+    saved = uploaded = 0
     for c in fresh:
         head = f"[{c.date} {c.slot}] {c.title}"
+        photo_note = f"  📷 사진 {len(c.photos)}장" if c.photos else ""
+        talk_note = f"  💬 대화 {len(c.comments)}줄" if c.comments else ""
         if args.dry_run:
-            print(f"  {head}")
-            print(f"       보낸사람: {c.sender}" + (f" | {c.url}" if c.url else ""))
+            print(f"  {head}{photo_note}{talk_note}")
+            if c.sender or c.url:
+                print(f"       보낸사람: {c.sender}" + (f" | {c.url}" if c.url else ""))
+            for p in c.photos:
+                print(f"       - {p.name}")
+            for cm in c.comments[:3]:
+                print(f"       💬 {cm.sender}: {cm.text[:50]}")
             continue
         try:
             entry_id = db.add_pending(c.date, c.slot, c.title, c.url, c.raw_text, c.source_key)
@@ -238,16 +276,50 @@ def cmd_import_kakao(args) -> int:
                 continue
             raise
         saved += 1
-        print(f"  + id={entry_id}  {head}")
+
+        if c.comments:
+            db.add_comments(entry_id, [
+                {"sender": cm.sender, "at": cm.at, "text": cm.text} for cm in c.comments
+            ])
+
+        for p in c.photos:
+            if p.digest in already_images:
+                continue
+            remote = f"{c.date}/{entry_id}-{p.digest[4:12]}{Path(p.name).suffix.lower()}"
+            try:
+                supa.upload_image(p.path, remote, p.mime)
+                db.add_attachment(entry_id, remote, p.name, None, p.digest)
+                already_images.add(p.digest)
+                uploaded += 1
+            except supa.SupabaseError as e:
+                print(f"       사진 올리기 실패({p.name}): {e}", file=sys.stderr)
+
+        print(f"  + id={entry_id}  {head}{photo_note}")
 
     if args.dry_run:
         print(f"\n새로 가져올 뉴스 {len(fresh)}건입니다.")
         print("(미리보기입니다. 실제로 저장하려면 --dry-run 을 빼고 다시 실행하세요.)")
     else:
         print(f"\n{saved}건을 해설 대기 상태로 저장했습니다." +
-              (f" (이미 정리된 {skipped}건은 건너뜀)" if skipped else ""))
+              (f" (이미 정리된 {skipped}건은 건너뜀)" if skipped else "") +
+              (f" 사진 {uploaded}장을 함께 올렸습니다." if uploaded else ""))
         if saved:
             print("이제 Claude Code에서 /news 를 실행하면 순서대로 해설이 작성됩니다.")
+    return 0
+
+
+def cmd_images(args) -> int:
+    """뉴스에 딸린 사진을 로컬에 내려받습니다 (/news 가 사진을 읽을 때 사용)."""
+    rows = db.list_attachments(args.id)
+    if not rows:
+        print(f"{args.id}번 뉴스에 사진이 없습니다.")
+        return 0
+    out_dir = Path(args.out or ".")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for r in rows:
+        dest = out_dir / f"{args.id}-{r['id']}{Path(r['path']).suffix or '.jpg'}"
+        supa.download(r["url"], str(dest))
+        print(dest)
     return 0
 
 
@@ -318,15 +390,23 @@ def build_parser() -> argparse.ArgumentParser:
     tk.add_argument("query", nargs="?", default=None)
     tk.set_defaults(func=cmd_tickers)
 
-    ik = sub.add_parser("import-kakao", help="카카오톡 대화 내보내기(.txt)에서 뉴스 가져오기")
-    ik.add_argument("file", help="카카오톡에서 내보낸 txt 파일 경로")
+    ik = sub.add_parser("import-kakao", help="카카오톡 대화 내보내기에서 뉴스 가져오기 (사진 포함)")
+    ik.add_argument("file", help="내보낸 txt 파일, 또는 사진이 함께 든 폴더/zip 경로")
     ik.add_argument("--sender", default=None, help="이 사람이 보낸 메시지만 (이름 일부)")
     ik.add_argument("--date-from", default=None)
     ik.add_argument("--date-to", default=None)
     ik.add_argument("--min-length", type=int, default=120,
                     help="링크가 없어도 이 글자 수 이상이면 뉴스로 봅니다 (기본 120)")
+    ik.add_argument("--no-images", action="store_true", help="사진은 가져오지 않기")
+    ik.add_argument("--no-comments", action="store_true",
+                    help="뉴스 주변 대화는 담지 않기 (기사만)")
     ik.add_argument("--dry-run", action="store_true", help="저장하지 않고 무엇이 들어갈지만 보기")
     ik.set_defaults(func=cmd_import_kakao)
+
+    im = sub.add_parser("images", help="뉴스에 딸린 사진을 로컬에 내려받기")
+    im.add_argument("id", type=int)
+    im.add_argument("--out", default="", help="저장할 폴더 (기본: 현재 폴더)")
+    im.set_defaults(func=cmd_images)
 
     d = sub.add_parser("delete", help="뉴스 삭제")
     d.add_argument("id", type=int)

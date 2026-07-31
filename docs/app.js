@@ -127,6 +127,32 @@ function groupedList(entries) {
   return out.join("");
 }
 
+function imageUrl(path) {
+  return `${SUPABASE_URL}/storage/v1/object/public/news-images/${
+    path.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+function photoBlock(shots) {
+  if (!shots || !shots.length) return "";
+  return `<section class="sec"><h2>📷 함께 온 사진</h2><div class="shots">` +
+    shots.map((s) => {
+      const u = imageUrl(s.path);
+      return `<a href="${u}" target="_blank" rel="noopener">
+        <img src="${u}" alt="${esc(s.original_name || "뉴스 사진")}" loading="lazy"></a>`;
+    }).join("") + `</div></section>`;
+}
+
+function commentBlock(rows) {
+  if (!rows || !rows.length) return "";
+  return `<section class="sec"><h2>💬 단톡방에서 오간 이야기</h2>
+<div class="sub" style="margin:0 0 10px">기사 본문이 아니라, 뉴스를 나눌 때 함께 오간 대화입니다.</div>
+<div class="talk">` +
+    rows.map((c) => `<div class="msg">
+      <div class="mh"><b>${esc(c.sender || "―")}</b> <span>${esc(c.at || "")}</span></div>
+      <div class="mb">${esc(c.text).replace(/\n/g, "<br>")}</div></div>`).join("") +
+    `</div></section>`;
+}
+
 function kakaoText(entry) {
   const lines = [`[${entry.date} ${entry.slot}] ${entry.title}`, `성격: ${entry.tone}`, ""];
   for (const s of entry.sections) { lines.push(s.title, s.body, ""); }
@@ -173,17 +199,28 @@ async function viewEntry(id) {
     : "";
 
   if (entry.status === "pending") {
+    const [{ data: shots }, { data: talk }] = await Promise.all([
+      sb.from("attachments").select("id,path,original_name").eq("entry_id", id).order("id"),
+      sb.from("comments").select("sender,at,text").eq("entry_id", id).order("idx"),
+    ]);
     return show(`${head}<h1>${esc(entry.title)}</h1>${src}
 <div class="note">아직 해설이 작성되지 않았습니다.
 Claude Code에서 <b>/news ${entry.id}</b> 를 실행하세요.</div>
-<div class="raw">${esc(entry.raw_text)}</div>`);
+${photoBlock(shots)}
+${entry.raw_text ? `<div class="raw">${esc(entry.raw_text)}</div>` : ""}
+${commentBlock(talk)}`);
   }
 
-  const [{ data: sections }, { data: tickers }] = await Promise.all([
-    sb.from("sections").select("idx,title,body").eq("entry_id", id).order("idx"),
-    sb.from("tickers").select("name,code").eq("entry_id", id).order("id"),
-  ]);
+  const [{ data: sections }, { data: tickers }, { data: shots }, { data: talk }] =
+    await Promise.all([
+      sb.from("sections").select("idx,title,body").eq("entry_id", id).order("idx"),
+      sb.from("tickers").select("name,code").eq("entry_id", id).order("id"),
+      sb.from("attachments").select("id,path,original_name").eq("entry_id", id).order("id"),
+      sb.from("comments").select("sender,at,text").eq("entry_id", id).order("idx"),
+    ]);
   entry.sections = sections || [];
+  const photos = photoBlock(shots);
+  const talkHtml = commentBlock(talk);
 
   const tick = (tickers || []).length
     ? `<div class="meta" style="margin:14px 0">` +
@@ -201,7 +238,7 @@ Claude Code에서 <b>/news ${entry.id}</b> 를 실행하세요.</div>
   <button id="mdbtn" class="btn ghost">마크다운 내려받기</button>
 </div>`;
 
-  show(`${head}<h1>${esc(entry.title)}</h1>${src}${tick}${actions}${secs}${actions}`);
+  show(`${head}<h1>${esc(entry.title)}</h1>${src}${tick}${actions}${photos}${secs}${talkHtml}${actions}`);
 
   const text = kakaoText(entry);
   document.querySelectorAll("#copybtn").forEach((b) => {

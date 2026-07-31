@@ -179,6 +179,47 @@ def update(table: str, params: dict[str, str], patch: dict) -> list[dict]:
     return _request(f"{_base_url()}/rest/v1/{table}?{qs}", "PATCH", patch, headers) or []
 
 
+BUCKET = "news-images"
+
+
+def upload_image(local_path: str, remote_path: str, content_type: str) -> str:
+    """이미지를 저장소에 올리고 공개 주소를 돌려줍니다."""
+    data = open(local_path, "rb").read()
+    url = f"{_base_url()}/storage/v1/object/{BUCKET}/{urllib.parse.quote(remote_path)}"
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("apikey", _api_key())
+    req.add_header("Authorization", f"Bearer {sign_in()}")
+    req.add_header("Content-Type", content_type)
+    req.add_header("x-upsert", "true")
+    try:
+        with urllib.request.urlopen(req, timeout=120):
+            pass
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")
+        raise SupabaseError(f"이미지 업로드 실패 [{e.code}] {detail}") from None
+    except urllib.error.URLError as e:
+        raise SupabaseError(f"이미지 업로드 중 연결 실패: {e.reason}") from None
+    return public_image_url(remote_path)
+
+
+def public_image_url(remote_path: str) -> str:
+    return f"{_base_url()}/storage/v1/object/public/{BUCKET}/{urllib.parse.quote(remote_path)}"
+
+
+def download(url: str, dest_path: str) -> str:
+    """공개 이미지를 로컬에 내려받습니다 (/news 가 사진을 읽을 때 사용)."""
+    req = urllib.request.Request(url)
+    req.add_header("apikey", _api_key())
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = resp.read()
+    except urllib.error.HTTPError as e:
+        raise SupabaseError(f"이미지 내려받기 실패 [{e.code}]") from None
+    with open(dest_path, "wb") as fh:
+        fh.write(data)
+    return dest_path
+
+
 def delete(table: str, params: dict[str, str]) -> list[dict]:
     qs = urllib.parse.urlencode(params, safe="*.,()")
     headers = {

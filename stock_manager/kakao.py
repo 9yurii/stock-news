@@ -14,10 +14,15 @@
 from __future__ import annotations
 
 import hashlib
+import pathlib
 import re
+import shutil
+import tempfile
 import unicodedata
 import urllib.parse
+import zipfile
 from dataclasses import dataclass, field
+from datetime import datetime
 
 URL_RE = re.compile(r"https?://[^\s]+")
 
@@ -44,11 +49,28 @@ IOS_MSG_RE = re.compile(
     r"(?P<h>\d{1,2}):(?P<mi>\d{2}),\s*(?P<sender>.+?)\s*:\s?(?P<text>.*)$"
 )
 
-# 뉴스로 볼 필요가 없는 시스템 메시지
-NOISE = (
-    "님이 들어왔습니다", "님이 나갔습니다", "저장한 날짜", "님을 초대했습니다",
-    "삭제된 메시지입니다", "사진을 보냈습니다", "동영상을 보냈습니다",
-    "이모티콘을 보냈습니다", "파일:", "샵검색:",
+# 시스템 안내문. 어디에 끼어 있든 그 메시지는 버립니다.
+NOISE_CONTAINS = (
+    "님이 들어왔습니다", "님이 나갔습니다", "님을 초대했습니다", "님이 나갔습니다.",
+    "저장한 날짜", "삭제된 메시지입니다", "채팅방 관리자가",
+)
+
+# 첨부 파일 자리표시 글자.
+# 내보내기 txt에는 사진·동영상 원본이 들어 있지 않고 이런 글자만 남습니다.
+# "이 사진 보세요" 같은 정상 메시지를 날리지 않도록 '완전히 일치할 때만' 버립니다.
+NOISE_EXACT = {
+    "사진", "동영상", "이모티콘", "음성메시지", "보이스톡", "페이스톡",
+    "선물", "삭제된 메시지입니다", "지도", "연락처",
+    "<사진>", "<동영상>", "[사진]", "[동영상]",
+    "사진을 보냈습니다.", "동영상을 보냈습니다.", "이모티콘을 보냈습니다.",
+    "사진을 보냈습니다", "동영상을 보냈습니다", "이모티콘을 보냈습니다",
+}
+
+# "사진 3장", "파일: 보고서.pdf" 처럼 뒤에 숫자·이름이 붙는 자리표시
+NOISE_PATTERNS = (
+    re.compile(r"^사진\s*\d+장$"),
+    re.compile(r"^파일\s*:\s*.+$"),
+    re.compile(r"^샵검색\s*:\s*.+$"),
 )
 
 
@@ -61,6 +83,14 @@ class Message:
 
 
 @dataclass
+class Comment:
+    """뉴스 주변에서 오간 단톡방 대화 한 줄."""
+    sender: str
+    at: str            # 'HH:MM'
+    text: str
+
+
+@dataclass
 class Candidate:
     date: str
     slot: str
@@ -68,11 +98,20 @@ class Candidate:
     title: str
     url: str
     raw_text: str
+    minutes: int = 0
     lines: list[str] = field(default_factory=list)
+    photos: list["Photo"] = field(default_factory=list)
+    comments: list["Comment"] = field(default_factory=list)
+    used: set[int] = field(default_factory=set)   # 본문으로 쓴 메시지 번호
 
     @property
     def source_key(self) -> str:
         """이 뉴스의 지문. 같은 대화를 다시 가져와도 같은 값이 나옵니다."""
+        if not self.url and not self.raw_text.strip() and self.photos:
+            # 사진만 있는 건은 사진 내용으로 판정합니다
+            return "kakao-" + hashlib.sha1(
+                "".join(p.digest for p in self.photos).encode("utf-8")
+            ).hexdigest()[:20]
         return make_source_key(self.date, self.url, self.raw_text)
 
 
@@ -172,7 +211,17 @@ def _is_noise(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return True
-    return any(n in stripped for n in NOISE)
+    if stripped in NOISE_EXACT:
+        return True
+    if any(p.match(stripped) for p in NOISE_PATTERNS):
+        return True
+    return any(n in stripped for n in NOISE_CONTAINS)
+
+
+def strip_attachment_lines(text: str) -> str:
+    """여러 줄 메시지에 섞인 첨부 자리표시 줄만 걷어냅니다."""
+    kept = [l for l in text.split("\n") if not _is_noise(l)]
+    return "\n".join(kept).strip()
 
 
 def _make_title(text: str, url: str) -> str:
@@ -180,11 +229,13 @@ def _make_title(text: str, url: str) -> str:
     body = URL_RE.sub("", text).strip()
     first = next((l.strip() for l in body.split("\n") if l.strip()), "")
     first = re.sub(r"\s+", " ", first)
-    if len(first) >= 6:
+    if len(first) >= 2:
         return first[:80]
     if url:
-        return url.split("?")[0][:80]
-    return first[:80] or "제목 없음"
+        # 주소밖에 없으면 마지막 경로 조각이라도 제목으로 씁니다
+        tail = url.split("?")[0].rstrip("/").rsplit("/", 1)[-1]
+        return (tail or url)[:80]
+    return "제목 없음"
 
 
 def extract(
@@ -204,7 +255,7 @@ def extract(
     picked: list[Candidate] = []
     last: tuple[str, str, int] | None = None  # (sender, date, minutes)
 
-    for msg in messages:
+    for idx, msg in enumerate(messages):
         if _is_noise(msg.text):
             continue
         if sender and sender not in msg.sender:
@@ -233,6 +284,7 @@ def extract(
         if merges_into_previous:
             cand = picked[-1]
             cand.lines.append(msg.text)
+            cand.used.add(idx)
             cand.raw_text = "\n".join(cand.lines)
             if urls and not cand.url:
                 cand.url = urls[0]
@@ -252,11 +304,72 @@ def extract(
             title=_make_title(msg.text, url),
             url=url,
             raw_text=msg.text,
+            minutes=msg.minutes,
             lines=[msg.text],
+            used={idx},
         ))
         last = (msg.sender, msg.date, msg.minutes)
 
     return picked
+
+
+def collect_comments(
+    messages: list[Message],
+    candidates: list[Candidate],
+    before: int = 5,
+    after: int = 40,
+) -> list[Candidate]:
+    """뉴스 주변에서 오간 대화를 코멘트로 모읍니다.
+
+    뉴스를 전달해 준 사람의 설명, 다른 사람의 반응처럼 기사 본문은 아니지만
+    같이 봐두면 좋은 이야기를 기사와 **구분해서** 담아둡니다.
+    """
+    consumed: set[int] = set()
+    for c in candidates:
+        consumed |= c.used
+
+    for idx, msg in enumerate(messages):
+        if idx in consumed or _is_noise(msg.text):
+            continue
+
+        near = [
+            c for c in candidates
+            if c.date == msg.date and -before <= msg.minutes - c.minutes <= after
+        ]
+        if not near:
+            continue
+
+        # 가장 가까운(직전) 뉴스에 붙입니다
+        owner = min(near, key=lambda c: abs(msg.minutes - c.minutes))
+        owner.comments.append(Comment(
+            sender=msg.sender,
+            at=f"{msg.minutes // 60:02d}:{msg.minutes % 60:02d}",
+            text=strip_attachment_lines(msg.text) or msg.text.strip(),
+        ))
+
+    return candidates
+
+
+def count_attachments(messages: list[Message]) -> int:
+    """사진·동영상 등 첨부 자리표시가 몇 개인지 셉니다.
+
+    내보내기 txt에는 원본 파일이 들어 있지 않으므로, 사진으로만 공유된 뉴스는
+    가져올 수 없습니다. 사용자에게 알려주기 위한 값입니다.
+    """
+    media = {"사진", "동영상", "<사진>", "<동영상>", "[사진]", "[동영상]",
+             "사진을 보냈습니다", "사진을 보냈습니다.",
+             "동영상을 보냈습니다", "동영상을 보냈습니다."}
+    count = 0
+    for m in messages:
+        for line in m.text.split("\n"):
+            line = line.strip()
+            if line in media:
+                count += 1
+            else:
+                hit = re.match(r"^사진\s*(\d+)장$", line)
+                if hit:
+                    count += int(hit.group(1))
+    return count
 
 
 def load(path: str) -> list[Message]:
@@ -268,3 +381,134 @@ def load(path: str) -> list[Message]:
         except UnicodeDecodeError:
             continue
     return parse(data.decode("utf-8", "replace"))
+
+
+# ─────────────────────────── 사진 ───────────────────────────
+
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic"}
+
+MIME = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".gif": "image/gif", ".webp": "image/webp", ".heic": "image/heic",
+}
+
+# 카톡이 내보내는 이미지 파일 이름에서 찍은 시각을 뽑습니다.
+#   2026-07-25 09-10-11.jpg / 20260725_091011.jpg / KakaoTalk_20260725_091011.jpg
+FILENAME_TIME_RES = (
+    re.compile(r"(?P<y>\d{4})[-_.]?(?P<mo>\d{2})[-_.]?(?P<d>\d{2})[ _-]+(?P<h>\d{2})[-:_]?(?P<mi>\d{2})"),
+    re.compile(r"(?P<y>\d{4})[-_.]?(?P<mo>\d{2})[-_.]?(?P<d>\d{2})"),
+)
+
+
+@dataclass
+class Photo:
+    path: str            # 로컬 파일 경로
+    name: str            # 원래 파일 이름
+    date: str            # YYYY-MM-DD
+    minutes: int | None  # 자정부터 흐른 분 (모르면 None)
+    digest: str          # 파일 내용 해시 (중복 방지)
+
+    @property
+    def mime(self) -> str:
+        return MIME.get(pathlib.Path(self.name).suffix.lower(), "application/octet-stream")
+
+
+def _photo_time(name: str, fallback_mtime: float) -> tuple[str, int | None]:
+    """파일 이름에서 날짜·시각을 뽑고, 없으면 파일 수정 시각을 씁니다."""
+    for regex in FILENAME_TIME_RES:
+        m = regex.search(name)
+        if not m:
+            continue
+        g = m.groupdict()
+        date = f"{g['y']}-{g['mo']}-{g['d']}"
+        if "h" in g and g.get("h") is not None:
+            return date, int(g["h"]) * 60 + int(g["mi"])
+        return date, None
+    dt = datetime.fromtimestamp(fallback_mtime)
+    return dt.strftime("%Y-%m-%d"), dt.hour * 60 + dt.minute
+
+
+def find_photos(folder: str) -> list[Photo]:
+    """폴더(또는 그 하위)에서 이미지 파일을 모두 찾습니다."""
+    root = pathlib.Path(folder)
+    photos: list[Photo] = []
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() or p.suffix.lower() not in IMAGE_EXTS:
+            continue
+        data = p.read_bytes()
+        date, minutes = _photo_time(p.name, p.stat().st_mtime)
+        photos.append(Photo(
+            path=str(p),
+            name=p.name,
+            date=date,
+            minutes=minutes,
+            digest="img-" + hashlib.sha1(data).hexdigest()[:20],
+        ))
+    return photos
+
+
+def attach_photos(
+    candidates: list[Candidate],
+    photos: list[Photo],
+    window_minutes: int = 20,
+) -> list[Candidate]:
+    """사진을 시간이 가까운 뉴스에 붙이고, 짝이 없는 사진은 따로 한 건으로 만듭니다.
+
+    카톡 내보내기 텍스트에는 사진의 파일 이름이 없어서, 어느 메시지의 사진인지
+    직접 알 수 없습니다. 그래서 **같은 날짜 + 가장 가까운 시각**으로 짝을 맞춥니다.
+    """
+    for photo in photos:
+        best = None
+        if photo.minutes is not None:
+            near = [
+                c for c in candidates
+                if c.date == photo.date and abs(c.minutes - photo.minutes) <= window_minutes
+            ]
+            if near:
+                best = min(near, key=lambda c: abs(c.minutes - photo.minutes))
+        if best is not None:
+            best.photos.append(photo)
+        else:
+            candidates.append(Candidate(
+                date=photo.date,
+                slot=_slot_of(photo.minutes if photo.minutes is not None else 9 * 60),
+                sender="",
+                title=f"사진 뉴스 ({photo.date})",
+                url="",
+                raw_text="",
+                minutes=photo.minutes if photo.minutes is not None else 9 * 60,
+                photos=[photo],
+            ))
+
+    candidates.sort(key=lambda c: (c.date, c.minutes))
+    return candidates
+
+
+def open_export(path: str) -> tuple[str | None, str, str | None]:
+    """내보내기 파일/폴더/zip 을 받아 (txt경로, 이미지폴더, 임시폴더) 를 돌려줍니다.
+
+    - .txt 를 주면 같은 폴더에서 이미지를 찾습니다
+    - 폴더를 주면 그 안의 txt 와 이미지를 찾습니다
+    - .zip 을 주면 임시 폴더에 풀어서 같은 방식으로 처리합니다 (호출한 쪽이 정리)
+    """
+    p = pathlib.Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"경로를 찾을 수 없습니다: {path}")
+
+    tmpdir = None
+    if p.suffix.lower() == ".zip":
+        tmpdir = tempfile.mkdtemp(prefix="kakao-")
+        with zipfile.ZipFile(p) as zf:
+            zf.extractall(tmpdir)
+        p = pathlib.Path(tmpdir)
+
+    if p.is_file():
+        return str(p), str(p.parent), tmpdir
+
+    txts = sorted(p.rglob("*.txt"))
+    return (str(txts[0]) if txts else None), str(p), tmpdir
+
+
+def cleanup(tmpdir: str | None) -> None:
+    if tmpdir:
+        shutil.rmtree(tmpdir, ignore_errors=True)
