@@ -236,7 +236,6 @@ ${commentBlock(talk)}`);
 
   const actions = `<div class="actions">
   <button id="copybtn" class="btn">단톡방용 복사</button>
-  <button id="mdbtn" class="btn ghost">마크다운 내려받기</button>
 </div>`;
 
   show(`${head}<h1>${esc(entry.title)}</h1>${src}${tick}${actions}${photos}${secs}${talkHtml}${actions}`);
@@ -248,19 +247,6 @@ ${commentBlock(talk)}`);
       const old = b.textContent;
       b.textContent = "복사했습니다";
       setTimeout(() => (b.textContent = old), 1600);
-    };
-  });
-  document.querySelectorAll("#mdbtn").forEach((b) => {
-    b.onclick = () => {
-      const md = [`# ${entry.title}`, "", `- 날짜: ${entry.date} (${entry.slot})`,
-        `- 성격: ${entry.tone}`, entry.url ? `- 원문: ${entry.url}` : "", "",
-        ...entry.sections.flatMap((s) => [`## ${s.title}`, "", s.body, ""])].join("\n");
-      const url = URL.createObjectURL(new Blob([md], { type: "text/markdown;charset=utf-8" }));
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${entry.date}_${entry.slot}.md`;
-      a.click();
-      URL.revokeObjectURL(url);
     };
   });
 }
