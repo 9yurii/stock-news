@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>뉴스 해설 아카이브</title>
+<meta name="description" content="주식 뉴스를 왕초보용 7단계 해설로 정리한 아카이브">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>">
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <nav>
+      <a class="brand" href="#/">📈 뉴스 해설 아카이브</a>
+      <a class="tab" href="#/" data-tab="/">홈</a>
+      <a class="tab" href="#/new" data-tab="/new" data-writer>뉴스 입력</a>
+      <a class="tab" href="#/search" data-tab="/search">검색</a>
+      <a class="tab" href="#/terms" data-tab="/terms">용어 사전</a>
+      <a class="tab" href="#/tickers" data-tab="/tickers">종목</a>
+      <span class="spacer"></span>
+      <span id="who" class="who"></span>
+      <a class="tab" href="#/login" id="loginlink">로그인</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <div id="app"><div class="empty">불러오는 중…</div></div>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    이 페이지의 해설은 투자 권유가 아니며, 판단과 책임은 본인의 몫입니다.
+  </div>
+</footer>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>
