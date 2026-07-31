@@ -10,6 +10,7 @@ const TONE_CLASS = { "호재": "up", "악재": "down", "중립": "flat", "해석
 
 let session = null;
 let canWrite = false;
+let pageCleanup = null;   // 화면을 떠날 때 정리할 것 (붙여넣기 이벤트 등)
 
 /* ───────────────────────── 유틸 ───────────────────────── */
 
@@ -270,51 +271,150 @@ async function viewNew() {
 <div class="empty"><a href="#/login">로그인하러 가기</a></div>`);
   }
   show(`<h1>뉴스 입력</h1>
-<div class="sub">기사 본문과 주소를 넣어두면, Claude Code에서 <b>/news</b> 실행 시 해설이 작성됩니다.</div>
-<div class="note">지난 날짜의 뉴스도 그대로 넣으시면 됩니다. <b>날짜</b>를 기사 날짜로 바꾸면
-목록에서 그 날짜 자리에 정리됩니다.</div>
+<div class="sub">카톡 화면을 캡쳐해서 붙여넣기만 하면 됩니다.
+Claude Code에서 <b>/news</b> 를 실행하면 사진을 읽어 해설을 씁니다.</div>
+
 <form class="box" id="f">
+  <label>뉴스 캡쳐 사진</label>
+  <div id="drop" class="drop" tabindex="0">
+    <div class="dropmsg">
+      <b>여기를 눌러 사진을 고르거나</b><br>
+      캡쳐한 그림을 <b>Ctrl+V</b> 로 붙여넣으세요<br>
+      <span>사진을 끌어다 놓아도 됩니다 · 여러 장 가능</span>
+    </div>
+    <input type="file" id="file" accept="image/*" multiple hidden>
+  </div>
+  <div id="preview" class="shots"></div>
+
   <div class="row">
-    <div><label>날짜 <span style="font-weight:400;color:var(--dim)">(기사 날짜)</span></label>
+    <div><label>날짜 <span class="opt">(기사 날짜)</span></label>
       <input type="date" name="date" value="${today()}" required></div>
     <div><label>시간대</label><select name="slot">
       ${SLOTS.map((s) => `<option>${s}</option>`).join("")}</select></div>
   </div>
-  <label>제목</label>
-  <input name="title" placeholder="예) 삼성전자 3분기 실적 발표" required>
-  <label>뉴스 주소 (URL)</label>
+
+  <label>제목 <span class="opt">(비워두면 자동)</span></label>
+  <input name="title" placeholder="예) 삼성전자 3분기 실적 발표">
+
+  <label>뉴스 주소 <span class="opt">(선택)</span></label>
   <input name="url" placeholder="https://..." type="url">
-  <label>뉴스 본문 붙여넣기</label>
-  <textarea name="raw_text" placeholder="기사 본문을 그대로 붙여넣으세요." required></textarea>
+
+  <label>글로 온 내용 <span class="opt">(선택 · 사진만 있으면 비워두세요)</span></label>
+  <textarea name="raw_text" placeholder="카톡에 글로 온 내용이 있으면 붙여넣으세요."></textarea>
+
   <button type="submit">저장하기</button>
   <div id="msg" class="sub" style="margin-top:12px"></div>
 </form>`);
 
   const form = document.getElementById("f");
+  const drop = document.getElementById("drop");
+  const fileInput = document.getElementById("file");
+  const preview = document.getElementById("preview");
+  const msg = document.getElementById("msg");
+  let picked = [];
+
+  function redraw() {
+    preview.innerHTML = picked.map((f, i) =>
+      `<div class="shot"><img src="${URL.createObjectURL(f)}" alt="">
+       <button type="button" class="x" data-i="${i}" title="빼기">×</button></div>`).join("");
+    preview.querySelectorAll("button.x").forEach((b) => {
+      b.onclick = () => { picked.splice(Number(b.dataset.i), 1); redraw(); };
+    });
+    drop.classList.toggle("has", picked.length > 0);
+  }
+
+  function addFiles(list) {
+    for (const f of list) if (f && f.type.startsWith("image/")) picked.push(f);
+    redraw();
+  }
+
+  drop.onclick = () => fileInput.click();
+  fileInput.onchange = () => { addFiles(fileInput.files); fileInput.value = ""; };
+
+  drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+  drop.ondragleave = () => drop.classList.remove("over");
+  drop.ondrop = (e) => {
+    e.preventDefault();
+    drop.classList.remove("over");
+    addFiles(e.dataTransfer.files);
+  };
+
+  // 화면 어디서든 Ctrl+V 로 캡쳐 붙여넣기
+  const onPaste = (e) => {
+    const files = [...(e.clipboardData?.items || [])]
+      .filter((it) => it.kind === "file" && it.type.startsWith("image/"))
+      .map((it) => it.getAsFile());
+    if (files.length) { e.preventDefault(); addFiles(files); }
+  };
+  document.addEventListener("paste", onPaste);
+  pageCleanup = () => document.removeEventListener("paste", onPaste);
+
   form.onsubmit = async (ev) => {
     ev.preventDefault();
-    const btn = form.querySelector("button");
+    const f = new FormData(form);
+    const body = (f.get("raw_text") || "").trim();
+
+    if (!picked.length && !body) {
+      msg.innerHTML = '<span class="err">사진을 넣거나 글 내용을 적어주세요.</span>';
+      return;
+    }
+
+    const btn = form.querySelector("button[type=submit]");
     btn.disabled = true;
     btn.textContent = "저장 중…";
-    const f = new FormData(form);
+
+    const date = f.get("date");
+    const title = (f.get("title") || "").trim() ||
+      (body ? body.split("\n")[0].slice(0, 60) : `뉴스 캡쳐 (${date})`);
+
     const { data, error } = await sb.from("entries").insert({
-      date: f.get("date"),
-      slot: f.get("slot"),
-      title: f.get("title").trim(),
+      date, slot: f.get("slot"), title,
       url: (f.get("url") || "").trim(),
-      raw_text: f.get("raw_text"),
-      status: "pending",
+      raw_text: body, status: "pending",
     }).select("id").single();
 
     if (error) {
-      document.getElementById("msg").innerHTML =
-        `<span style="color:#b91c1c">저장 실패: ${esc(error.message)}</span>`;
+      msg.innerHTML = `<span class="err">저장 실패: ${esc(error.message)}</span>`;
       btn.disabled = false;
       btn.textContent = "저장하기";
       return;
     }
+
+    let failed = 0;
+    for (let i = 0; i < picked.length; i++) {
+      btn.textContent = `사진 올리는 중… (${i + 1}/${picked.length})`;
+      try {
+        const file = picked[i];
+        const digest = await sha1(file);
+        const ext = (file.name.match(/\.[a-z0-9]+$/i) || [".png"])[0].toLowerCase();
+        const path = `${date}/${data.id}-${digest.slice(0, 8)}${ext}`;
+        const up = await sb.storage.from("news-images")
+          .upload(path, file, { upsert: true, contentType: file.type });
+        if (up.error) throw up.error;
+        const ins = await sb.from("attachments").insert({
+          entry_id: data.id, path, original_name: file.name || "capture.png",
+          source_key: "img-" + digest.slice(0, 20),
+        });
+        if (ins.error && !String(ins.error.message).includes("duplicate")) throw ins.error;
+      } catch (e) {
+        console.error(e);
+        failed++;
+      }
+    }
+
+    if (failed) {
+      msg.innerHTML = `<span class="err">사진 ${failed}장을 올리지 못했습니다. 나머지는 저장됐습니다.</span>`;
+      setTimeout(() => (location.hash = `#/entry/${data.id}`), 1800);
+      return;
+    }
     location.hash = `#/entry/${data.id}`;
   };
+}
+
+async function sha1(file) {
+  const buf = await file.arrayBuffer();
+  const hash = await crypto.subtle.digest("SHA-1", buf);
+  return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 async function viewSearch(params) {
@@ -555,6 +655,7 @@ const ROUTES = [
 ];
 
 async function route() {
+  if (pageCleanup) { pageCleanup(); pageCleanup = null; }
   const raw = location.hash.replace(/^#/, "") || "/";
   const [pathRaw, queryRaw = ""] = raw.split("?");
   const path = pathRaw.replace(/\/+$/, "") || "/";

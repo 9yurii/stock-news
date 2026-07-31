@@ -30,7 +30,8 @@ SOLICIT_PATTERNS = [
     r"매수를?\s*권",
     r"파세요",
     r"팔아라",
-    r"사라",
+    # "사라" 뒤에 다른 한글이 오면 '사라지다' 같은 낱말이므로 권유가 아닙니다
+    r"사라(?![가-힣])",
     r"매도\s*하세요",
     r"매도\s*추천",
     r"매도를?\s*권",
@@ -42,8 +43,11 @@ SOLICIT_PATTERNS = [
 
 
 def _sentence_count(text: str) -> int:
-    """마침표/물음표/느낌표로 끝나는 문장 수를 셉니다."""
-    return len([s for s in re.split(r"[.!?]\s*", text.strip()) if s.strip()])
+    """마침표/물음표/느낌표로 끝나는 문장 수를 셉니다.
+
+    숫자 사이의 점(60.5조, 10.8%)은 문장 끝이 아니므로 세지 않습니다.
+    """
+    return len([s for s in re.split(r"(?<!\d)[.!?](?!\d)\s*", text.strip()) if s.strip()])
 
 
 def normalize(report: dict) -> dict:
