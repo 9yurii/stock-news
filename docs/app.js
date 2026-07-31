@@ -234,9 +234,12 @@ async function viewNew() {
   }
   show(`<h1>뉴스 입력</h1>
 <div class="sub">기사 본문과 주소를 넣어두면, Claude Code에서 <b>/news</b> 실행 시 해설이 작성됩니다.</div>
+<div class="note">지난 날짜의 뉴스도 그대로 넣으시면 됩니다. <b>날짜</b>를 기사 날짜로 바꾸면
+목록에서 그 날짜 자리에 정리됩니다.</div>
 <form class="box" id="f">
   <div class="row">
-    <div><label>날짜</label><input type="date" name="date" value="${today()}" required></div>
+    <div><label>날짜 <span style="font-weight:400;color:var(--dim)">(기사 날짜)</span></label>
+      <input type="date" name="date" value="${today()}" required></div>
     <div><label>시간대</label><select name="slot">
       ${SLOTS.map((s) => `<option>${s}</option>`).join("")}</select></div>
   </div>
@@ -447,16 +450,17 @@ ${rows.length ? rows.map((r) => `<div class="card">
 
 function viewLogin() {
   if (session) {
-    return show(`<h1>계정</h1>
+    show(`<h1>계정</h1>
 <div class="sub">${esc(session.user.email)} 으로 로그인되어 있습니다.</div>
 <div class="note">${canWrite
   ? "이 계정은 뉴스 입력·수정 권한이 있습니다."
   : "이 계정은 <b>읽기 전용</b>입니다. 쓰기 권한은 허용 목록에 등록된 이메일에만 부여됩니다."}</div>
-<button id="out" class="btn ghost">로그아웃</button>`) ||
-      (document.getElementById("out").onclick = async () => {
-        await sb.auth.signOut();
-        location.hash = "#/";
-      });
+<button id="out" class="btn ghost">로그아웃</button>`);
+    document.getElementById("out").onclick = async () => {
+      await sb.auth.signOut();
+      location.hash = "#/";
+    };
+    return;
   }
 
   show(`<h1>로그인</h1>
