@@ -183,6 +183,74 @@ def cmd_tickers(args) -> int:
     return 0
 
 
+def cmd_import_kakao(args) -> int:
+    from . import kakao
+
+    messages = kakao.load(args.file)
+    if not messages:
+        print("대화 내용을 읽지 못했습니다. 카카오톡 [대화 내보내기]로 만든 txt 파일인지 확인해 주세요.",
+              file=sys.stderr)
+        return 1
+
+    cands = kakao.extract(
+        messages,
+        sender=args.sender,
+        date_from=args.date_from,
+        date_to=args.date_to,
+        min_length=args.min_length,
+    )
+    print(f"메시지 {len(messages)}개에서 뉴스 후보 {len(cands)}건을 찾았습니다.")
+
+    # 이미 가져온 건은 빼둡니다. 카톡 내보내기는 늘 대화 전체를 담고 있어서,
+    # 며칠 뒤 다시 내보내도 새로 올라온 것만 들어가게 됩니다.
+    already = db.existing_source_keys()
+    seen_now: set[str] = set()
+    fresh, skipped = [], 0
+    for c in cands:
+        key = c.source_key
+        if key in already or key in seen_now:
+            skipped += 1
+            continue
+        seen_now.add(key)
+        fresh.append(c)
+
+    if skipped:
+        print(f"이미 정리된 {skipped}건은 건너뜁니다.")
+    print()
+
+    if not fresh:
+        print("새로 가져올 뉴스가 없습니다." if cands
+              else "조건에 맞는 메시지가 없습니다. --min-length 를 줄이거나 --sender 를 빼고 다시 시도해 보세요.")
+        return 0
+
+    saved = 0
+    for c in fresh:
+        head = f"[{c.date} {c.slot}] {c.title}"
+        if args.dry_run:
+            print(f"  {head}")
+            print(f"       보낸사람: {c.sender}" + (f" | {c.url}" if c.url else ""))
+            continue
+        try:
+            entry_id = db.add_pending(c.date, c.slot, c.title, c.url, c.raw_text, c.source_key)
+        except supa.SupabaseError as e:
+            if "duplicate key" in str(e) or "entries_source_key_uniq" in str(e):
+                skipped += 1
+                continue
+            raise
+        saved += 1
+        print(f"  + id={entry_id}  {head}")
+
+    if args.dry_run:
+        print(f"\n새로 가져올 뉴스 {len(fresh)}건입니다.")
+        print("(미리보기입니다. 실제로 저장하려면 --dry-run 을 빼고 다시 실행하세요.)")
+    else:
+        print(f"\n{saved}건을 해설 대기 상태로 저장했습니다." +
+              (f" (이미 정리된 {skipped}건은 건너뜀)" if skipped else ""))
+        if saved:
+            print("이제 Claude Code에서 /news 를 실행하면 순서대로 해설이 작성됩니다.")
+    return 0
+
+
 def cmd_delete(args) -> int:
     if db.delete_entry(args.id):
         print(f"{args.id}번 뉴스를 삭제했습니다.")
@@ -249,6 +317,16 @@ def build_parser() -> argparse.ArgumentParser:
     tk.add_argument("--name", default=None, help="이 종목이 언급된 뉴스를 시간순으로")
     tk.add_argument("query", nargs="?", default=None)
     tk.set_defaults(func=cmd_tickers)
+
+    ik = sub.add_parser("import-kakao", help="카카오톡 대화 내보내기(.txt)에서 뉴스 가져오기")
+    ik.add_argument("file", help="카카오톡에서 내보낸 txt 파일 경로")
+    ik.add_argument("--sender", default=None, help="이 사람이 보낸 메시지만 (이름 일부)")
+    ik.add_argument("--date-from", default=None)
+    ik.add_argument("--date-to", default=None)
+    ik.add_argument("--min-length", type=int, default=120,
+                    help="링크가 없어도 이 글자 수 이상이면 뉴스로 봅니다 (기본 120)")
+    ik.add_argument("--dry-run", action="store_true", help="저장하지 않고 무엇이 들어갈지만 보기")
+    ik.set_defaults(func=cmd_import_kakao)
 
     d = sub.add_parser("delete", help="뉴스 삭제")
     d.add_argument("id", type=int)

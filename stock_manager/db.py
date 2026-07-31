@@ -20,11 +20,15 @@ def init_db() -> str:
 
 # ─────────────────────────── 쓰기 ───────────────────────────
 
-def add_pending(date: str, slot: str, title: str, url: str, raw_text: str) -> int:
-    rows = supa.insert("entries", {
+def add_pending(date: str, slot: str, title: str, url: str, raw_text: str,
+                source_key: str | None = None) -> int:
+    row = {
         "date": date, "slot": slot, "title": title,
         "url": url or "", "raw_text": raw_text, "status": "pending",
-    })
+    }
+    if source_key:
+        row["source_key"] = source_key
+    rows = supa.insert("entries", row)
     return int(rows[0]["id"])
 
 
@@ -232,6 +236,20 @@ def ticker_timeline(name: str) -> list[dict]:
         "id": f"in.({','.join(str(i) for i in ids)})",
         "order": "date.desc,id.desc",
     })]
+
+
+def existing_source_keys() -> set[str]:
+    """이미 가져온 뉴스의 지문 목록 (카톡 재수입 시 중복 제거용)."""
+    rows = supa.select("entries", {
+        "select": "source_key", "source_key": "not.is.null", "limit": "5000",
+    })
+    return {r["source_key"] for r in rows if r.get("source_key")}
+
+
+def existing_urls() -> set[str]:
+    """이미 저장된 뉴스 주소."""
+    rows = supa.select("entries", {"select": "url", "limit": "5000"})
+    return {r.get("url") or "" for r in rows}
 
 
 def stats() -> dict:
