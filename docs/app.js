@@ -367,6 +367,7 @@ Claude Code에서 <b>/news</b> 를 실행하면 사진을 읽어 해설을 씁�
     }
 
     let failed = 0;
+    let lastError = "";
     for (let i = 0; i < picked.length; i++) {
       btn.textContent = `사진 올리는 중… (${i + 1}/${picked.length})`;
       try {
@@ -384,13 +385,23 @@ Claude Code에서 <b>/news</b> 를 실행하면 사진을 읽어 해설을 씁�
         if (ins.error && !String(ins.error.message).includes("duplicate")) throw ins.error;
       } catch (e) {
         console.error(e);
+        lastError = e?.message || String(e);
         failed++;
       }
     }
 
+    // 사진이 전부 실패했고 글 내용도 없으면 빈 항목이 남습니다. 그건 지우고 알려줍니다.
+    if (failed === picked.length && picked.length && !body) {
+      await sb.from("entries").delete().eq("id", data.id);
+      msg.innerHTML = `<span class="err">사진을 올리지 못해 저장을 취소했습니다.<br>${esc(lastError)}</span>`;
+      btn.disabled = false;
+      btn.textContent = "저장하기";
+      return;
+    }
+
     if (failed) {
       msg.innerHTML = `<span class="err">사진 ${failed}장을 올리지 못했습니다. 나머지는 저장됐습니다.</span>`;
-      setTimeout(() => (location.hash = `#/entry/${data.id}`), 1800);
+      setTimeout(() => (location.hash = `#/entry/${data.id}`), 2500);
       return;
     }
     location.hash = `#/entry/${data.id}`;
